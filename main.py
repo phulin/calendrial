@@ -101,6 +101,7 @@ def restrict(parsed, startTime, endTime):
 class MainHandler(webapp.RequestHandler):
     @decorator.oauth_required
     def post(self):
+        pass
 
     @decorator.oauth_required
     def get(self):
