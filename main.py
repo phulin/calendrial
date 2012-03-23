@@ -115,9 +115,14 @@ class MainHandler(webapp.RequestHandler):
         }
         # self.response.out.write(template.render(genpath('index.html'), variables))
 
+class CreateHandler(webapp.RequestHandler):
+    def get(self):
+        self.response.out.write(template.render(genpath('create.html'), {}))
+
 def main():
     application = webapp.WSGIApplication(
         [
+         ('/create', CreateHandler),
          ('/', MainHandler),
         ],
         debug=True)
