@@ -26,13 +26,15 @@ import logging
 import os
 import pickle
 import operator
-from datetime import datetime
+import datetime
 import iso8601
+import uuid
 
 from apiclient.discovery import build
 from oauth2client.appengine import oauth2decorator_from_clientsecrets
 from oauth2client.client import AccessTokenRefreshError
 from google.appengine.api import memcache
+from google.appengine.api.oauth import get_current_user
 from google.appengine.ext import webapp
 from google.appengine.ext.webapp import template
 from google.appengine.ext.webapp.util import run_wsgi_app
@@ -71,17 +73,19 @@ decorator = oauth2decorator_from_clientsecrets(
 genpath = lambda s: os.path.join(os.path.dirname(__file__), s)
 
 class Slice(db.Model):
-    guid = StringProperty(required=True)
-    startDate = DateProperty(required=True)
-    endDate = DateProperty(required=True)
-    startTime = DateProperty(required=True)
-    endTime = DateProperty(required=True)
+    startDate = db.DateProperty(required=True)
+    endDate = db.DateProperty(required=True)
+    startTime = db.TimeProperty(required=True)
+    endTime = db.TimeProperty(required=True)
 
-def getEvents(cid, http):
+class User(db.Model):
+    user = db.UserProperty(required=True)
+
+def getEvents(cid, http, startDate, endDate):
     response = service.events().list(
         calendarId = cid,
-        timeMin = '2012-03-20T00:00:00Z',
-        timeMax = '2012-04-01T00:00:00Z',
+        timeMin = startDate.isoformat(),
+        timeMax = endDate.isoformat(),
         singleEvents = True,
     ).execute(http)
     if 'items' in response:
@@ -92,39 +96,109 @@ def getEvents(cid, http):
 def restrict(parsed, startTime, endTime):
     new = list()
     for e in parsed:
-        if e[0] > startTime or e[1] < endTime:
-            if e[0] < startTime: e[0] = startTime
-            if e[1] > endTime: e[1] = endTime
-            new.append(e)
+        eStart = e[0].time()
+        eEnd = e[1].time()
+        if eStart > startTime or eEnd < endTime:
+            if eStart < startTime: eStart = startTime
+            if eEnd > endTime: eEnd = endTime
+            newStart = datetime.datetime.combine(e[0].date(), eStart)
+            newEnd = datetime.datetime.combine(e[1].date(), eEnd)
+            new.append((newStart, newEnd))
     return new
+
+def mergeEvents(parsed):
+    ordered = sorted(parsed, key = lambda x: x[0])
+    return reduce(mergeEvent, ordered, [])
+
+# merge one event into a list
+def mergeEvent(events, e):
+    if len(events) == 0:
+        return [e]
+    last = events[-1]
+    if last[1] < e[0]:
+        events.append(e)
+    else:
+        last[1] = max(e[1], last[1])
+    return events
+
+def user_key(user):
+    return db.Key.from_path('User', user.user_id())
+def slice_key(user, guid):
+    return db.Key.from_path('User', user.user_id(), 'Slice', guid)
+
+# stolen from Python docs
+class UTC(datetime.tzinfo):
+    """UTC"""
+    def utcoffset(self, dt): return datetime.timedelta(0)
+    def tzname(self, dt): return "UTC"
+    def dst(self, dt): return datetime.timedelta(0)
 
 class MainHandler(webapp.RequestHandler):
     @decorator.oauth_required
-    def post(self):
-        pass
+    def get(self, guid):
+        user = get_current_user()
 
-    @decorator.oauth_required
-    def get(self):
+        slice = db.get(slice_key(user, guid))
+        startDT = datetime.datetime.combine(slice.startDate, slice.startTime)
+        startDT = startDT.replace(tzinfo = UTC())
+        endDT = datetime.datetime.combine(slice.endDate, slice.endTime)
+        endDT = endDT.replace(tzinfo = UTC())
+
         http = decorator.http()
         cals = service.calendarList().list(minAccessRole='writer').execute(http)['items']
-        cal_ids = [cal['id'] for cal in cals]
-        events = reduce(operator.add, [getEvents(c, http) for c in cal_ids])
-        start_end = [(e['start']['dateTime'], e['end']['dateTime']) for e in events]
-        parsed = [map(iso8601.parse_date, e) for e in start_end]
-        self.response.out.write(parsed)
-        variables = {
-        }
+        cal_ids = [ cal['id'] for cal in cals ]
+        eventsLists = [ getEvents(c, http, startDT, endDT) for c in cal_ids ]
+        events = reduce(operator.add, eventsLists)
+        start_end = [ (e['start']['dateTime'], e['end']['dateTime']) for e in events ]
+        parsed = [ map(iso8601.parse_date, e) for e in start_end ]
+        restricted = restrict(parsed, slice.startTime, slice.endTime)
+        merged = mergeEvents(restricted)
+        self.response.out.write(merged)
+        # variables = {
+        # }
         # self.response.out.write(template.render(genpath('index.html'), variables))
 
 class CreateHandler(webapp.RequestHandler):
+    @decorator.oauth_required
+    def post(self):
+        def getDate(s):
+            dateString = self.request.get(s)
+            format = "%Y-%m-%d"
+            return datetime.datetime.strptime(dateString, format).date()
+        def getTime(s):
+            dateString = self.request.get(s)
+            if dateString == "00:00:00":
+                return datetime.time(0, 0, 1)
+            format = "%H:%M:%S"
+            dt = datetime.datetime.strptime(dateString, format)
+            return dt.time()
+
+        guid = uuid.uuid4().hex
+        user = get_current_user()
+
+        dbUser = db.get(user_key(user))
+        if not dbUser:
+            dbUser = User(key_name = user.user_id(), user = user)
+            dbUser.put()
+
+        slice = Slice(parent = user_key(user),
+                      startDate = getDate('startDate'),
+                      endDate = getDate('endDate'),
+                      startTime = getTime('startTime'),
+                      endTime = getTime('endTime'),
+                      key_name = guid)
+        slice.put()
+
+        self.redirect('/' + guid)
+
     def get(self):
         self.response.out.write(template.render(genpath('create.html'), {}))
 
 def main():
     application = webapp.WSGIApplication(
         [
-         ('/create', CreateHandler),
-         ('/', MainHandler),
+         ('/', CreateHandler),
+         (r'/(.*)', MainHandler),
         ],
         debug=True)
     run_wsgi_app(application)
