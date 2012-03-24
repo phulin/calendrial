@@ -93,6 +93,33 @@ def getEvents(cid, http, startDate, endDate):
     else:
         return []
 
+# split multi-day events
+def splitEvents(events):
+    return reduce(operator.add, map(splitEvent, events))
+
+def splitEvent(e):
+    if e[0].date() == e[1].date():
+        return [e]
+    else:
+        result = list()
+        
+        eStartDate = e[0].date()
+        eEndDate = e[1].date()
+        
+        firstEnd = datetime.datetime.combine(eStartDate, datetime.time(23, 59, 59))
+        result.append((e[0], firstEnd))
+        
+        numDays = (eEndDate - eStartDate).days
+        for date in [ eStartDate + datetime.timedelta(days = x) for x in range(numDays - 1) ]:
+            start = datetime.datetime.combine(date, datetime.time(0, 0, 1))
+            end = datetime.datetime.combine(date, datetime.time(23, 59, 59))
+            result.append((start, end))
+
+        lastStart = datetime.datetime.combine(eEndDate, datetime.time(0, 0, 1))
+        result.append((lastStart, e[1]))
+    return result
+
+# assume no events span days, i.e. call splitEvents first
 def restrict(parsed, startTime, endTime):
     new = list()
     for e in parsed:
@@ -118,8 +145,27 @@ def mergeEvent(events, e):
     if last[1] < e[0]:
         events.append(e)
     else:
-        last[1] = max(e[1], last[1])
+        events[-1] = (last[0], max(e[1], last[1]))
     return events
+
+def invert(events):
+    inverted = list()
+    first = events[0]
+    if first[0].time() > datetime.time(0, 0, 1):
+        beforeFirst = datetime.datetime.combine(first[0], datetime.time(0, 0, 1))
+        inverted.append((beforeFirst, first[0]))
+
+    for i in range(len(events) - 1):
+        now = events[i]
+        next = events[i + 1]
+        inverted.append((now[1], next[0]))
+
+    last = events[-1]
+    if last[1].time() < datetime.time(23, 59, 59):
+        afterLast = datetime.datetime.combine(last[1], datetime.time(23, 59, 59))
+        inverted.append((last[1], afterLast))
+
+    return inverted
 
 def user_key(user):
     return db.Key.from_path('User', user.user_id())
@@ -151,9 +197,11 @@ class MainHandler(webapp.RequestHandler):
         events = reduce(operator.add, eventsLists)
         start_end = [ (e['start']['dateTime'], e['end']['dateTime']) for e in events ]
         parsed = [ map(iso8601.parse_date, e) for e in start_end ]
-        restricted = restrict(parsed, slice.startTime, slice.endTime)
-        merged = mergeEvents(restricted)
-        self.response.out.write(merged)
+        merged = mergeEvents(parsed)
+        inverted = invert(merged)
+        splitDone = splitEvents(inverted)
+        restricted = restrict(splitDone, slice.startTime, slice.endTime)
+        self.response.out.write(restricted)
         # variables = {
         # }
         # self.response.out.write(template.render(genpath('index.html'), variables))
