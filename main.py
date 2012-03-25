@@ -125,7 +125,7 @@ def restrict(parsed, startTime, endTime):
     for e in parsed:
         eStart = e[0].time()
         eEnd = e[1].time()
-        if eStart > startTime or eEnd < endTime:
+        if eEnd > startTime and eStart < endTime:
             if eStart < startTime: eStart = startTime
             if eEnd > endTime: eEnd = endTime
             newStart = datetime.datetime.combine(e[0].date(), eStart)
@@ -167,6 +167,10 @@ def invert(events):
 
     return inverted
 
+def out(event):
+    start, end = event
+    return start.strftime("%x: %X") + " to " + end.strftime("%X")
+
 def user_key(user):
     return db.Key.from_path('User', user.user_id())
 def slice_key(user, guid):
@@ -197,11 +201,13 @@ class MainHandler(webapp.RequestHandler):
         events = reduce(operator.add, eventsLists)
         start_end = [ (e['start']['dateTime'], e['end']['dateTime']) for e in events ]
         parsed = [ map(iso8601.parse_date, e) for e in start_end ]
-        merged = mergeEvents(parsed)
-        inverted = invert(merged)
-        splitDone = splitEvents(inverted)
+        merged = mergeEvents(parsed) # merge adjacent events
+        inverted = invert(merged) # availability, not busy
+        splitDone = splitEvents(inverted) # split multi-day events
+        # now we should be guaranteed to have only one-day blocks
         restricted = restrict(splitDone, slice.startTime, slice.endTime)
-        self.response.out.write(restricted)
+        for e in restricted:
+            self.response.out.write(out(e) + "<br />")
         # variables = {
         # }
         # self.response.out.write(template.render(genpath('index.html'), variables))
