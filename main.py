@@ -110,7 +110,7 @@ def splitEvent(e):
         result.append((e[0], firstEnd))
         
         numDays = (eEndDate - eStartDate).days
-        for date in [ eStartDate + datetime.timedelta(days = x) for x in range(numDays - 1) ]:
+        for date in [ eStartDate + datetime.timedelta(days = x) for x in range(1, numDays) ]:
             start = datetime.datetime.combine(date, datetime.time(0, 0, 1))
             end = datetime.datetime.combine(date, datetime.time(23, 59, 59))
             result.append((start, end))
@@ -167,9 +167,30 @@ def invert(events):
 
     return inverted
 
-def out(event):
-    start, end = event
-    return start.strftime("%x: %X") + " to " + end.strftime("%X")
+# takes list of tuples of (start, end)
+# returns list of tuples of [(date, [(startTime, endTime)])]
+def groupEvents(events):
+    return reduce(groupEvent, events, [])
+def groupEvent(events, e):
+    timeTuple = (e[0].time(), e[1].time())
+
+    if len(events) == 0:
+        return [(e[0].date(), [timeTuple])]
+
+    lastDate, lastTimes = events[-1]
+    if lastDate == e[0].date():
+        lastTimes.append(timeTuple)
+    else:
+        events.append((e[0].date(), [timeTuple]))
+
+    return events
+
+def dayOut(dayTuple):
+    date, timeList = dayTuple
+    result = date.strftime("%x: ")
+    for (startTime, endTime) in timeList:
+        result += startTime.strftime("%X") + " to " + endTime.strftime("%X") + ", "
+    return result
 
 def user_key(user):
     return db.Key.from_path('User', user.user_id())
@@ -186,6 +207,10 @@ class UTC(datetime.tzinfo):
 class MainHandler(webapp.RequestHandler):
     @decorator.oauth_required
     def get(self, guid):
+        def linesOut(xs):
+            for x in xs:
+                self.response.out.write(str(x) + "<br />")
+
         user = get_current_user()
 
         slice = db.get(slice_key(user, guid))
@@ -201,13 +226,17 @@ class MainHandler(webapp.RequestHandler):
         events = reduce(operator.add, eventsLists)
         start_end = [ (e['start']['dateTime'], e['end']['dateTime']) for e in events ]
         parsed = [ map(iso8601.parse_date, e) for e in start_end ]
+
         merged = mergeEvents(parsed) # merge adjacent events
         inverted = invert(merged) # availability, not busy
+        linesOut(inverted)
         splitDone = splitEvents(inverted) # split multi-day events
+        linesOut(splitDone)
         # now we should be guaranteed to have only one-day blocks
         restricted = restrict(splitDone, slice.startTime, slice.endTime)
-        for e in restricted:
-            self.response.out.write(out(e) + "<br />")
+        dayGrouped = groupEvents(restricted)
+        for e in dayGrouped:
+            self.response.out.write(dayOut(e) + "<br />")
         # variables = {
         # }
         # self.response.out.write(template.render(genpath('index.html'), variables))
