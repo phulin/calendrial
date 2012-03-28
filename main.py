@@ -215,6 +215,11 @@ class MainHandler(webapp.RequestHandler):
 
         http = httplib2.Http()
         credentials.authorize(http)
+        if credentials.access_token_expired:
+            logging.debug("get: access token expired, refreshing")
+            credentials.refresh(http)
+            credentials.authorize(http)
+
         service = build(
                 serviceName='calendar', version='v3', http=http,
                 developerKey=settings.developer_key
@@ -232,6 +237,7 @@ class MainHandler(webapp.RequestHandler):
         # now we should be guaranteed to have only one-day blocks
         restricted = restrict(splitDone, slice.startTime, slice.endTime)
         dayGrouped = groupEvents(restricted)
+
         variables = {
             'days': map(dayOut, dayGrouped),
             'startDate': slice.startDate.strftime("%x"),
