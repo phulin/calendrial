@@ -29,15 +29,17 @@ import operator
 import datetime
 import iso8601
 import uuid
+import hashlib
 
 from apiclient.discovery import build
-from oauth2client.appengine import oauth2decorator_from_clientsecrets
-from oauth2client.client import AccessTokenRefreshError
+from oauth2client.client import AccessTokenRefreshError, OAuth2WebServerFlow
+from oauth2client.clientsecrets import loadfile
+from oauth2client.appengine import CredentialsProperty
 from google.appengine.api import memcache
 from google.appengine.api.oauth import get_current_user
 from google.appengine.ext import webapp
 from google.appengine.ext.webapp import template
-from google.appengine.ext.webapp.util import run_wsgi_app
+from google.appengine.ext.webapp.util import run_wsgi_app, login_required
 from google.appengine.ext import db
 
 # CLIENT_SECRETS, name of a file containing the OAuth 2.0 information for this
@@ -46,29 +48,12 @@ from google.appengine.ext import db
 # Console <http://code.google.com/apis/console>
 CLIENT_SECRETS = os.path.join(os.path.dirname(__file__), 'client_secrets.json')
 
-# Helpful message to display in the browser if the CLIENT_SECRETS file
-# is missing.
-MISSING_CLIENT_SECRETS_MESSAGE = """
-<h1>Warning: Please configure OAuth 2.0</h1>
-<p>
-To make this sample run you will need to populate the client_secrets.json file
-found at:
-    </p>
-<p>
-<code>%s</code>.
-</p>
-<p>with information found on the <a
-href="https://code.google.com/apis/console">APIs Console</a>.
-</p>
-""" % CLIENT_SECRETS
-
 http = httplib2.Http(memcache)
-service = build(serviceName='calendar', version='v3', http=http,
-                developerKey=settings.developer_key)
-decorator = oauth2decorator_from_clientsecrets(
-                CLIENT_SECRETS,
-                'https://www.googleapis.com/auth/calendar.readonly',
-                MISSING_CLIENT_SECRETS_MESSAGE)
+
+# decorator = oauth2decorator_from_clientsecrets(
+#                 CLIENT_SECRETS,
+#                 'https://www.googleapis.com/auth/calendar.readonly',
+#                 MISSING_CLIENT_SECRETS_MESSAGE)
 
 genpath = lambda s: os.path.join(os.path.dirname(__file__), s)
 
@@ -80,8 +65,9 @@ class Slice(db.Model):
 
 class User(db.Model):
     user = db.UserProperty(required=True)
+    credentials = CredentialsProperty()
 
-def getEvents(cid, http, startDate, endDate):
+def getEvents(cid, service, http, startDate, endDate):
     response = service.events().list(
         calendarId = cid,
         timeMin = startDate.isoformat(),
@@ -187,15 +173,18 @@ def groupEvent(events, e):
 
 def dayOut(dayTuple):
     date, timeList = dayTuple
-    result = date.strftime("%x: ")
+    dateString = date.strftime("%x: ")
+    timeStrings = []
     for (startTime, endTime) in timeList:
-        result += startTime.strftime("%X") + " to " + endTime.strftime("%X") + ", "
-    return result
+        timeStrings.append(startTime.strftime("%X") + " to " + endTime.strftime("%X"))
+    return dateString + reduce(lambda x, y: x + ", " + y, timeStrings)
 
-def user_key(user):
-    return db.Key.from_path('User', user.user_id())
-def slice_key(user, guid):
-    return db.Key.from_path('User', user.user_id(), 'Slice', guid)
+def mkUserHash(user):
+    return hashlib.md5(user.user_id()).hexdigest()
+def userKey(userHash):
+    return db.Key.from_path('User', userHash)
+def sliceKey(userHash, guid):
+    return db.Key.from_path('User', userHash, 'Slice', guid)
 
 # stolen from Python docs
 class UTC(datetime.tzinfo):
@@ -205,33 +194,37 @@ class UTC(datetime.tzinfo):
     def dst(self, dt): return datetime.timedelta(0)
 
 class MainHandler(webapp.RequestHandler):
-    @decorator.oauth_required
-    def get(self, guid):
+    def get(self, userHash, guid):
         def linesOut(xs):
             for x in xs:
                 self.response.out.write(str(x) + "<br />")
 
-        user = get_current_user()
-
-        slice = db.get(slice_key(user, guid))
+        slice = db.get(sliceKey(userHash, guid))
         startDT = datetime.datetime.combine(slice.startDate, slice.startTime)
         startDT = startDT.replace(tzinfo = UTC())
         endDT = datetime.datetime.combine(slice.endDate, slice.endTime)
         endDT = endDT.replace(tzinfo = UTC())
 
-        http = decorator.http()
+        credentials = db.get(userKey(userHash)).credentials
+        if not credentials:
+            raise ValueError("No credentials")
+
+        http = httplib2.Http()
+        credentials.authorize(http)
+        service = build(
+                serviceName='calendar', version='v3', http=http,
+                developerKey=settings.developer_key
+        )
         cals = service.calendarList().list(minAccessRole='writer').execute(http)['items']
         cal_ids = [ cal['id'] for cal in cals ]
-        eventsLists = [ getEvents(c, http, startDT, endDT) for c in cal_ids ]
+        eventsLists = [ getEvents(c, service, http, startDT, endDT) for c in cal_ids ]
         events = reduce(operator.add, eventsLists)
         start_end = [ (e['start']['dateTime'], e['end']['dateTime']) for e in events ]
         parsed = [ map(iso8601.parse_date, e) for e in start_end ]
 
         merged = mergeEvents(parsed) # merge adjacent events
         inverted = invert(merged) # availability, not busy
-        linesOut(inverted)
         splitDone = splitEvents(inverted) # split multi-day events
-        linesOut(splitDone)
         # now we should be guaranteed to have only one-day blocks
         restricted = restrict(splitDone, slice.startTime, slice.endTime)
         dayGrouped = groupEvents(restricted)
@@ -242,7 +235,6 @@ class MainHandler(webapp.RequestHandler):
         # self.response.out.write(template.render(genpath('index.html'), variables))
 
 class CreateHandler(webapp.RequestHandler):
-    @decorator.oauth_required
     def post(self):
         def getDate(s):
             dateString = self.request.get(s)
@@ -258,30 +250,72 @@ class CreateHandler(webapp.RequestHandler):
 
         guid = uuid.uuid4().hex
         user = get_current_user()
+        slice = Slice(
+                parent = userKey(mkUserHash(user)),
+                startDate = getDate('startDate'),
+                endDate = getDate('endDate'),
+                startTime = getTime('startTime'),
+                endTime = getTime('endTime'),
+                key_name = guid
+        )
+        slice.put()
+        redirectUrl = '/' + mkUserHash(user) + '/' + guid
 
-        dbUser = db.get(user_key(user))
+        dbUser = db.get(userKey(mkUserHash(user)))
         if not dbUser:
-            dbUser = User(key_name = user.user_id(), user = user)
+            dbUser = User(
+                    key_name = mkUserHash(user),
+                    user = user,
+                    credentials = None
+            )
             dbUser.put()
 
-        slice = Slice(parent = user_key(user),
-                      startDate = getDate('startDate'),
-                      endDate = getDate('endDate'),
-                      startTime = getTime('startTime'),
-                      endTime = getTime('endTime'),
-                      key_name = guid)
-        slice.put()
+        if dbUser.credentials is None:
+            xxxx, clientInfo = loadfile(CLIENT_SECRETS)
+            flow = OAuth2WebServerFlow(
+                    client_id = clientInfo['client_id'],
+                    client_secret = clientInfo['client_secret'],
+                    scope = 'https://www.googleapis.com/auth/calendar.readonly',
+                    access_type = 'offline'
+            )
+            callback = self.request.relative_url('/oauth2callback')
+            authorizeUrl = flow.step1_get_authorize_url(callback)
+            memcache.set(user.user_id(), pickle.dumps(flow))
+            memcache.set(user.user_id() + "_url", redirectUrl)
+            self.redirect(authorizeUrl)
+        else:
+            self.redirect(redirectUrl)
 
-        self.redirect('/' + guid)
-
+    @login_required
     def get(self):
         self.response.out.write(template.render(genpath('create.html'), {}))
+
+class MyOAuthHandler(webapp.RequestHandler):
+    @login_required
+    def get(self):
+        user = get_current_user()
+        pickledFlow = memcache.get(user.user_id())
+        if not pickledFlow:
+            raise ValueError("flow not in cache")
+        flow = pickle.loads(memcache.get(user.user_id()))
+        if flow:
+            credentials = flow.step2_exchange(self.request.params)
+            dbUser = db.get(userKey(mkUserHash(user)))            
+            if not dbUser:
+                dbUser = User(key_name = mkUserHash(user), user = user)
+            dbUser.credentials = credentials
+            dbUser.put()
+            self.redirect(memcache.get(user.user_id() + "_url"))
+        else:
+            raise ValueError("No flow")
+
 
 def main():
     application = webapp.WSGIApplication(
         [
          ('/', CreateHandler),
-         (r'/(.*)', MainHandler),
+         ('/oauth2callback', MyOAuthHandler),
+         (r'/(.+)/(.+)', MainHandler),
         ],
         debug=True)
     run_wsgi_app(application)
