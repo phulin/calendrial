@@ -205,12 +205,17 @@ class MainHandler(webapp.RequestHandler):
                 self.response.out.write(str(x) + "<br />")
 
         slice = db.get(sliceKey(userHash, guid))
+        if not slice:
+            self.response.out.write("No such slice.")
+            return
         startDT = datetime.datetime.combine(slice.startDate, slice.startTime)
         startDT = startDT.replace(tzinfo = UTC())
         endDT = datetime.datetime.combine(slice.endDate, slice.endTime)
         endDT = endDT.replace(tzinfo = UTC())
 
         dbUser = db.get(userKey(userHash))
+        if not user:
+            raise ValueError("No user")
         user = dbUser.user
         credentials = dbUser.credentials
         if not credentials:
