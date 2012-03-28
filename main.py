@@ -134,12 +134,14 @@ def mergeEvent(events, e):
         events[-1] = (last[0], max(e[1], last[1]))
     return events
 
-def invert(events):
+def invert(events, startDate, endDate):
     inverted = list()
+
     first = events[0]
-    if first[0].time() > datetime.time(0, 0, 1):
-        beforeFirst = datetime.datetime.combine(first[0], datetime.time(0, 0, 1))
-        inverted.append((beforeFirst, first[0]))
+    startStart = datetime.datetime.combine(startDate, datetime.time(0, 0, 1))
+    startStart = startStart.replace(tzinfo = UTC())
+    if first[0] > startStart:
+        inverted.append((startStart, first[0]))
 
     for i in range(len(events) - 1):
         now = events[i]
@@ -147,9 +149,10 @@ def invert(events):
         inverted.append((now[1], next[0]))
 
     last = events[-1]
-    if last[1].time() < datetime.time(23, 59, 59):
-        afterLast = datetime.datetime.combine(last[1], datetime.time(23, 59, 59))
-        inverted.append((last[1], afterLast))
+    endEnd = datetime.datetime.combine(endDate, datetime.time(23, 59, 59))
+    endEnd = endEnd.replace(tzinfo = UTC())
+    if last[1] < endEnd:
+        inverted.append((last[1], endEnd))
 
     return inverted
 
@@ -232,7 +235,7 @@ class MainHandler(webapp.RequestHandler):
         parsed = [ map(iso8601.parse_date, e) for e in start_end ]
 
         merged = mergeEvents(parsed) # merge adjacent events
-        inverted = invert(merged) # availability, not busy
+        inverted = invert(merged, slice.startDate, slice.endDate) # availability, not busy
         splitDone = splitEvents(inverted) # split multi-day events
         # now we should be guaranteed to have only one-day blocks
         restricted = restrict(splitDone, slice.startTime, slice.endTime)
