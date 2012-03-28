@@ -172,11 +172,13 @@ def groupEvent(events, e):
     return events
 
 def dayOut(dayTuple):
+    dateFormat = "%A, %B %d"
+    timeFormat = "%H:%M"
     date, timeList = dayTuple
-    dateString = date.strftime("%x: ")
+    dateString = date.strftime(dateFormat + ": ")
     timeStrings = []
     for (startTime, endTime) in timeList:
-        timeStrings.append(startTime.strftime("%X") + " to " + endTime.strftime("%X"))
+        timeStrings.append(startTime.strftime(timeFormat) + " to " + endTime.strftime(timeFormat))
     return dateString + reduce(lambda x, y: x + ", " + y, timeStrings)
 
 def mkUserHash(user):
@@ -205,7 +207,9 @@ class MainHandler(webapp.RequestHandler):
         endDT = datetime.datetime.combine(slice.endDate, slice.endTime)
         endDT = endDT.replace(tzinfo = UTC())
 
-        credentials = db.get(userKey(userHash)).credentials
+        dbUser = db.get(userKey(userHash))
+        user = dbUser.user
+        credentials = dbUser.credentials
         if not credentials:
             raise ValueError("No credentials")
 
@@ -228,11 +232,16 @@ class MainHandler(webapp.RequestHandler):
         # now we should be guaranteed to have only one-day blocks
         restricted = restrict(splitDone, slice.startTime, slice.endTime)
         dayGrouped = groupEvents(restricted)
-        for e in dayGrouped:
-            self.response.out.write(dayOut(e) + "<br />")
-        # variables = {
-        # }
-        # self.response.out.write(template.render(genpath('index.html'), variables))
+        variables = {
+            'days': map(dayOut, dayGrouped),
+            'startDate': slice.startDate.strftime("%x"),
+            'endDate': slice.endDate.strftime("%x"),
+            'startTime': slice.startTime.strftime("%X"),
+            'endTime': slice.endTime.strftime("%X"),
+            'nickname': user.nickname(),
+            'email': user.email()
+        }
+        self.response.out.write(template.render(genpath('index.html'), variables))
 
 class CreateHandler(webapp.RequestHandler):
     def post(self):
@@ -270,7 +279,9 @@ class CreateHandler(webapp.RequestHandler):
             )
             dbUser.put()
 
-        if dbUser.credentials is None:
+        credentials = dbUser.credentials
+        def requestToken():
+            logging.debug('requesting new access token')
             xxxx, clientInfo = loadfile(CLIENT_SECRETS)
             flow = OAuth2WebServerFlow(
                     client_id = clientInfo['client_id'],
@@ -283,7 +294,17 @@ class CreateHandler(webapp.RequestHandler):
             memcache.set(user.user_id(), pickle.dumps(flow))
             memcache.set(user.user_id() + "_url", redirectUrl)
             self.redirect(authorizeUrl)
+        if credentials is None:
+            requestToken()
         else:
+            if credentials.access_token_expired:
+                logging.debug('refreshing access token')
+                try:
+                    credentials.refresh(httplib2.Http())
+                except AccessTokenRefreshError:
+                    logging.debug("refresh failed.")
+                    requestToken()
+                    return
             self.redirect(redirectUrl)
 
     @login_required

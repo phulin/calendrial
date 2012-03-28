@@ -1,3 +1,14 @@
-{% for item in cals %}
-{{ item }}
-{% endfor %}
+<html>
+	<head>
+		<title>
+			Calendrial: Availability for {{ nickname }}
+		</title>
+	</head>
+	<body>
+		<h2>Availability for {{ nickname }} &lt;{{ email }}&gt;</h2>
+		<h3>From {{ startDate }} to {{ endDate }} between {{ startTime }} and {{ endTime }}</h3>
+		<p>{% for day in days %}
+		{{ day }}<br />
+		{% endfor %}</p>
+	</body>
+</html>
