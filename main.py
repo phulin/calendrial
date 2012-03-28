@@ -182,7 +182,7 @@ def dayOut(dayTuple):
     return dateString + reduce(lambda x, y: x + ", " + y, timeStrings)
 
 def mkUserHash(user):
-    return hashlib.md5(user.user_id()).hexdigest()
+    return hashlib.md5(user.user_id()).hexdigest()[:8]
 def userKey(userHash):
     return db.Key.from_path('User', userHash)
 def sliceKey(userHash, guid):
@@ -240,10 +240,10 @@ class MainHandler(webapp.RequestHandler):
 
         variables = {
             'days': map(dayOut, dayGrouped),
-            'startDate': slice.startDate.strftime("%x"),
-            'endDate': slice.endDate.strftime("%x"),
-            'startTime': slice.startTime.strftime("%X"),
-            'endTime': slice.endTime.strftime("%X"),
+            'startDate': slice.startDate.strftime("%A, %B %d"),
+            'endDate': slice.endDate.strftime("%A, %B %d"),
+            'startTime': slice.startTime.strftime("%H:%M"),
+            'endTime': slice.endTime.strftime("%H:%M"),
             'nickname': user.nickname(),
             'email': user.email()
         }
@@ -263,7 +263,7 @@ class CreateHandler(webapp.RequestHandler):
             dt = datetime.datetime.strptime(dateString, format)
             return dt.time()
 
-        guid = uuid.uuid4().hex
+        guid = uuid.uuid4().hex[:8]
         user = get_current_user()
         slice = Slice(
                 parent = userKey(mkUserHash(user)),
