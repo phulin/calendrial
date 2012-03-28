@@ -42,6 +42,10 @@ from google.appengine.ext.webapp import template
 from google.appengine.ext.webapp.util import run_wsgi_app, login_required
 from google.appengine.ext import db
 
+# Canonical date and time formats. Ignoring localization.
+dateFormat = "%A, %B %d"
+timeFormat = "%I:%M %p"
+
 # CLIENT_SECRETS, name of a file containing the OAuth 2.0 information for this
 # application, including client_id and client_secret, which are found
 # on the API Access tab on the Google APIs
@@ -175,8 +179,6 @@ def groupEvent(events, e):
     return events
 
 def dayOut(dayTuple):
-    dateFormat = "%A, %B %d"
-    timeFormat = "%H:%M"
     date, timeList = dayTuple
     dateString = date.strftime(dateFormat + ": ")
     timeStrings = []
@@ -232,7 +234,10 @@ class MainHandler(webapp.RequestHandler):
                 serviceName='calendar', version='v3', http=http,
                 developerKey=settings.developer_key
         )
-        cals = service.calendarList().list(minAccessRole='writer').execute(http)['items']
+        calendarList = service.calendarList()
+        cals = calendarList.list(
+                minAccessRole='writer'
+        ).execute(http)['items']
         cal_ids = [ cal['id'] for cal in cals ]
         eventsLists = [ getEvents(c, service, http, startDT, endDT) for c in cal_ids ]
         events = reduce(operator.add, eventsLists)
@@ -248,10 +253,10 @@ class MainHandler(webapp.RequestHandler):
 
         variables = {
             'days': map(dayOut, dayGrouped),
-            'startDate': slice.startDate.strftime("%A, %B %d"),
-            'endDate': slice.endDate.strftime("%A, %B %d"),
-            'startTime': slice.startTime.strftime("%H:%M"),
-            'endTime': slice.endTime.strftime("%H:%M"),
+            'startDate': slice.startDate.strftime(dateFormat),
+            'endDate': slice.endDate.strftime(dateFormat),
+            'startTime': slice.startTime.strftime(timeFormat),
+            'endTime': slice.endTime.strftime(timeFormat),
             'nickname': user.nickname(),
             'email': user.email()
         }
