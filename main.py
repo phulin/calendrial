@@ -30,7 +30,9 @@ import datetime
 import iso8601
 import uuid
 import hashlib
+import pytz
 
+from pytz import timezone
 from apiclient.discovery import build
 from oauth2client.client import AccessTokenRefreshError, OAuth2WebServerFlow
 from oauth2client.clientsecrets import loadfile
@@ -71,12 +73,13 @@ class User(db.Model):
     user = db.UserProperty(required=True)
     credentials = CredentialsProperty()
 
-def getEvents(cid, service, http, startDate, endDate):
+def getEvents(cid, service, http, startDate, endDate, timeZone):
     response = service.events().list(
         calendarId = cid,
         timeMin = startDate.isoformat(),
         timeMax = endDate.isoformat(),
         singleEvents = True,
+        timeZone = timeZone
     ).execute(http)
     if 'items' in response:
         return response['items']
@@ -92,13 +95,13 @@ def splitEvent(e):
         return [e]
     else:
         result = list()
-        
+
         eStartDate = e[0].date()
         eEndDate = e[1].date()
-        
+
         firstEnd = datetime.datetime.combine(eStartDate, datetime.time(23, 59, 59))
         result.append((e[0], firstEnd))
-        
+
         numDays = (eEndDate - eStartDate).days
         for date in [ eStartDate + datetime.timedelta(days = x) for x in range(1, numDays) ]:
             start = datetime.datetime.combine(date, datetime.time(0, 0, 1))
@@ -138,12 +141,12 @@ def mergeEvent(events, e):
         events[-1] = (last[0], max(e[1], last[1]))
     return events
 
-def invert(events, startDate, endDate):
+def invert(events, startDate, endDate, tzinfo):
     inverted = list()
 
     first = events[0]
     startStart = datetime.datetime.combine(startDate, datetime.time(0, 0, 1))
-    startStart = startStart.replace(tzinfo = UTC())
+    startStart = startStart.replace(tzinfo = tzinfo)
     if first[0] > startStart:
         inverted.append((startStart, first[0]))
 
@@ -154,7 +157,7 @@ def invert(events, startDate, endDate):
 
     last = events[-1]
     endEnd = datetime.datetime.combine(endDate, datetime.time(23, 59, 59))
-    endEnd = endEnd.replace(tzinfo = UTC())
+    endEnd = endEnd.replace(tzinfo = tzinfo)
     if last[1] < endEnd:
         inverted.append((last[1], endEnd))
 
@@ -193,30 +196,44 @@ def userKey(userHash):
 def sliceKey(userHash, guid):
     return db.Key.from_path('User', userHash, 'Slice', guid)
 
-# stolen from Python docs
-class UTC(datetime.tzinfo):
-    """UTC"""
-    def utcoffset(self, dt): return datetime.timedelta(0)
-    def tzname(self, dt): return "UTC"
-    def dst(self, dt): return datetime.timedelta(0)
+class StringTZInfo(datetime.tzinfo):
+    """tzinfo class from string"""
+    def __init__(self, s):
+        self.s = s
+        pm = s[0]
+        hour = int(s[1:3])
+        minute = int(s[3:5])
+        if pm == "+":
+            self.delta = datetime.timedelta(hours = hour, minutes = minute)
+        else:
+            self.delta = datetime.timedelta(hours = - hour, minutes = minute)
+
+    def utcoffset(self, dt): return self.delta
+    def dst(self, dt): return self.delta
+    def tzname(self, dt): return self.s
 
 class MainHandler(webapp.RequestHandler):
-    def get(self, userHash, guid):
+    def get(self, userHash, guid, timeZone = None):
         def linesOut(xs):
             for x in xs:
                 self.response.out.write(str(x) + "<br />")
+
+        if not timeZone:
+            timeZone = "-0400"
+        tzinfo = StringTZInfo(timeZone)
 
         slice = db.get(sliceKey(userHash, guid))
         if not slice:
             self.response.out.write("No such slice.")
             return
+        # interpret given times as being in the given time zone
         startDT = datetime.datetime.combine(slice.startDate, slice.startTime)
-        startDT = startDT.replace(tzinfo = UTC())
+        startDT = startDT.replace(tzinfo = tzinfo)
         endDT = datetime.datetime.combine(slice.endDate, slice.endTime)
-        endDT = endDT.replace(tzinfo = UTC())
+        endDT = endDT.replace(tzinfo = tzinfo)
 
         dbUser = db.get(userKey(userHash))
-        if not user:
+        if not dbUser:
             raise ValueError("No user")
         user = dbUser.user
         credentials = dbUser.credentials
@@ -235,17 +252,18 @@ class MainHandler(webapp.RequestHandler):
                 developerKey=settings.developer_key
         )
         calendarList = service.calendarList()
-        cals = calendarList.list(
+        response = calendarList.list(
                 minAccessRole='writer'
-        ).execute(http)['items']
-        cal_ids = [ cal['id'] for cal in cals ]
-        eventsLists = [ getEvents(c, service, http, startDT, endDT) for c in cal_ids ]
-        events = reduce(operator.add, eventsLists)
-        start_end = [ (e['start']['dateTime'], e['end']['dateTime']) for e in events ]
-        parsed = [ map(iso8601.parse_date, e) for e in start_end ]
+        ).execute(http)
+        cals = response['items']
 
+        calIds = [ cal['id'] for cal in cals ]
+        eventsLists = [ getEvents(c, service, http, startDT, endDT, timeZone) for c in calIds ]
+        events = reduce(operator.add, eventsLists)
+        startEnd = [ (e['start']['dateTime'], e['end']['dateTime']) for e in events]
+        parsed = [ map(iso8601.parse_date, e) for e in startEnd ]
         merged = mergeEvents(parsed) # merge adjacent events
-        inverted = invert(merged, slice.startDate, slice.endDate) # availability, not busy
+        inverted = invert(merged, slice.startDate, slice.endDate, tzinfo) # availability, not busy
         splitDone = splitEvents(inverted) # split multi-day events
         # now we should be guaranteed to have only one-day blocks
         restricted = restrict(splitDone, slice.startTime, slice.endTime)
@@ -257,6 +275,7 @@ class MainHandler(webapp.RequestHandler):
             'endDate': slice.endDate.strftime(dateFormat),
             'startTime': slice.startTime.strftime(timeFormat),
             'endTime': slice.endTime.strftime(timeFormat),
+            'timeZone': timeZone,
             'nickname': user.nickname(),
             'email': user.email()
         }
@@ -288,6 +307,9 @@ class CreateHandler(webapp.RequestHandler):
         )
         slice.put()
         redirectUrl = '/' + mkUserHash(user) + '/' + guid
+        timeZone = self.request.get('timeZone')
+        if timeZone is not "":
+            redirectUrl += '/' + timeZone
 
         dbUser = db.get(userKey(mkUserHash(user)))
         if not dbUser:
@@ -355,7 +377,8 @@ def main():
         [
          ('/', CreateHandler),
          ('/oauth2callback', MyOAuthHandler),
-         (r'/(.+)/(.+)', MainHandler),
+         (r'/([0-9a-f]{8})/([0-9a-f]{8})/(.+)', MainHandler),
+         (r'/([0-9a-f]{8})/([0-9a-f]{8})', MainHandler),
         ],
         debug=True)
     run_wsgi_app(application)

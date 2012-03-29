@@ -6,7 +6,7 @@
 	</head>
 	<body>
 		<h2>Availability for {{ nickname }} &lt;{{ email }}&gt;</h2>
-		<h3>From {{ startDate }} to {{ endDate }} between {{ startTime }} and {{ endTime }}</h3>
+		<h3>From {{ startDate }} to {{ endDate }} between {{ startTime }} and {{ endTime }}, in time zone {{ timeZone }}</h3>
 		<p>{% for day in days %}
 		{{ day }}<br />
 		{% endfor %}</p>
