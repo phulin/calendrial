@@ -30,7 +30,6 @@ import datetime
 import iso8601
 import uuid
 import hashlib
-import pytz
 
 from pytz import timezone
 from apiclient.discovery import build
