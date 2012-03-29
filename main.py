@@ -31,7 +31,6 @@ import iso8601
 import uuid
 import hashlib
 
-from pytz import timezone
 from apiclient.discovery import build
 from oauth2client.client import AccessTokenRefreshError, OAuth2WebServerFlow
 from oauth2client.clientsecrets import loadfile
