@@ -70,6 +70,8 @@ class Slice(db.Model):
 class User(db.Model):
     user = db.UserProperty(required=True)
     credentials = CredentialsProperty()
+    guid = db.StringProperty()
+    guidExpiry = db.DateTimeProperty()
 
 def getEvents(cid, service, http, startDate, endDate, timeZone):
     response = service.events().list(
@@ -221,8 +223,8 @@ class MainHandler(webapp.RequestHandler):
         tzinfo = StringTZInfo(timeZone)
 
         slice = db.get(sliceKey(userHash, guid))
-        if not slice:
-            self.response.out.write("No such slice.")
+        if slice is None:
+            self.response.out.write("No such slice (userHash: %s, guid: %s)." % (userHash, guid))
             return
         # interpret given times as being in the given time zone
         startDT = datetime.datetime.combine(slice.startDate, slice.startTime)
@@ -239,11 +241,11 @@ class MainHandler(webapp.RequestHandler):
             raise ValueError("No credentials")
 
         http = httplib2.Http()
-        credentials.authorize(http)
+        http = credentials.authorize(http)
         if credentials.access_token_expired:
             logging.debug("get: access token expired, refreshing")
             credentials.refresh(http)
-            credentials.authorize(http)
+            http = credentials.authorize(http)
 
         service = build(
                 serviceName='calendar', version='v3', http=http,
@@ -279,8 +281,7 @@ class MainHandler(webapp.RequestHandler):
         }
         self.response.out.write(template.render(genpath('index.html'), variables))
 
-class CreateHandler(webapp.RequestHandler):
-    def post(self):
+    def post(self, userHash, guid):
         def getDate(s):
             dateString = self.request.get(s)
             format = "%Y-%m-%d"
@@ -293,10 +294,23 @@ class CreateHandler(webapp.RequestHandler):
             dt = datetime.datetime.strptime(dateString, format)
             return dt.time()
 
-        guid = uuid.uuid4().hex[:8]
-        user = get_current_user()
+        dbUser = db.get(userKey(userHash))
+        if not dbUser:
+            raise ValueError('No such user')
+        # TODO: replace these with real templates
+        if dbUser.guid != guid:
+            self.response.out.write('invalid guid')
+            return
+        if dbUser.guidExpiry <= datetime.datetime.now():
+            self.response.out.write('guid expired')
+            return
+        # revoke secret
+        # dbUser.guid = None
+        # dbUser.guidExpiry = None
+        # dbUser.put()
+
         slice = Slice(
-                parent = userKey(mkUserHash(user)),
+                parent = userKey(userHash),
                 startDate = getDate('startDate'),
                 endDate = getDate('endDate'),
                 startTime = getTime('startTime'),
@@ -304,21 +318,33 @@ class CreateHandler(webapp.RequestHandler):
                 key_name = guid
         )
         slice.put()
-        redirectUrl = '/' + mkUserHash(user) + '/' + guid
+        redirectUrl = '/' + userHash + '/' + guid
         timeZone = self.request.get('timeZone')
         if timeZone is not "":
             redirectUrl += '/' + timeZone
 
+        if not dbUser.credentials:
+            raise ValueError("No credentials while posting")
+        self.redirect(redirectUrl)
+
+class CreateHandler(webapp.RequestHandler):
+    @login_required
+    def get(self):
+        user = get_current_user()
+        guid = uuid.uuid4().hex[:8]
+
         dbUser = db.get(userKey(mkUserHash(user)))
         if not dbUser:
+            logging.debug('making new user')
             dbUser = User(
                     key_name = mkUserHash(user),
                     user = user,
-                    credentials = None
             )
-            dbUser.put()
+        dbUser.guid = guid
+        dbUser.guidExpiry = datetime.datetime.now() + datetime.timedelta(minutes = 10)
+        dbUser.put()
 
-        credentials = dbUser.credentials
+        redirectUrl = '/'
         def requestToken():
             logging.debug('requesting new access token')
             xxxx, clientInfo = loadfile(CLIENT_SECRETS)
@@ -326,6 +352,7 @@ class CreateHandler(webapp.RequestHandler):
                     client_id = clientInfo['client_id'],
                     client_secret = clientInfo['client_secret'],
                     scope = 'https://www.googleapis.com/auth/calendar.readonly',
+                    user_agent = 'calendrial/0.0',
                     access_type = 'offline'
             )
             callback = self.request.relative_url('/oauth2callback')
@@ -333,22 +360,29 @@ class CreateHandler(webapp.RequestHandler):
             memcache.set(user.user_id(), pickle.dumps(flow))
             memcache.set(user.user_id() + "_url", redirectUrl)
             self.redirect(authorizeUrl)
+
+        credentials = dbUser.credentials
         if credentials is None:
             requestToken()
+            return
         else:
             if credentials.access_token_expired:
                 logging.debug('refreshing access token')
                 try:
-                    credentials.refresh(httplib2.Http())
+                    http = httplib2.Http()
+                    http = credentials.authorize(http)
+                    credentials.refresh(http)
                 except AccessTokenRefreshError:
                     logging.debug("refresh failed.")
                     requestToken()
                     return
-            self.redirect(redirectUrl)
 
-    @login_required
-    def get(self):
-        self.response.out.write(template.render(genpath('create.html'), {}))
+        variables = {
+                'userHash': mkUserHash(user),
+                'userId': user.user_id(),
+                'guid': guid
+        }
+        self.response.out.write(template.render(genpath('create.html'), variables))
 
 class MyOAuthHandler(webapp.RequestHandler):
     @login_required
@@ -356,19 +390,19 @@ class MyOAuthHandler(webapp.RequestHandler):
         user = get_current_user()
         pickledFlow = memcache.get(user.user_id())
         if not pickledFlow:
-            raise ValueError("flow not in cache")
+            raise ValueError("Flow not in cache")
         flow = pickle.loads(memcache.get(user.user_id()))
         if flow:
             credentials = flow.step2_exchange(self.request.params)
             dbUser = db.get(userKey(mkUserHash(user)))            
             if not dbUser:
-                dbUser = User(key_name = mkUserHash(user), user = user)
+                raise ValueError("Shouldn't be creating dbUsers in callback.")
+                # dbUser = User(key_name = mkUserHash(user), user = user)
             dbUser.credentials = credentials
             dbUser.put()
-            self.redirect(memcache.get(user.user_id() + "_url"))
+            self.redirect(memcache.get(user.user_id() + '_url'))
         else:
             raise ValueError("No flow")
-
 
 def main():
     application = webapp.WSGIApplication(
